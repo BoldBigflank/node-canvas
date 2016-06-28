@@ -126,7 +126,11 @@ get_family_name(FT_Face face) {
 
   GList *best_def = g_list_first(list);
   if (best_def) utf8name = (char*) strdup(((NameDef*)best_def->data)->buf);
-  if (list) g_list_free_full(list, free);
+  if (list) {
+    // g_list_free_full(list, free);
+    g_list_foreach( list, (GFunc)free, NULL);
+    g_list_free(list);
+  }
 
   return utf8name;
 }
