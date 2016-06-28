@@ -4,21 +4,29 @@
 // Copyright (c) 2010 LearnBoost <tj@learnboost.com>
 //
 
-#include "Canvas.h"
-#include "PNG.h"
-#include "CanvasRenderingContext2d.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <string.h>
 #include <node_buffer.h>
 #include <node_version.h>
+#include <glib.h>
 #include <cairo-pdf.h>
 #include <cairo-svg.h>
+
+#include "Canvas.h"
+#include "PNG.h"
+#include "CanvasRenderingContext2d.h"
 #include "closure.h"
+#include "register_font.h"
 
 #ifdef HAVE_JPEG
 #include "JPEGStream.h"
 #endif
+
+#define GENERIC_FACE_ERROR \
+  "The second argument to registerFont is required, and should be an object " \
+  "with at least a family (string) and optionally weight (string/number) " \
+  "and style (string)."
 
 Nan::Persistent<FunctionTemplate> Canvas::constructor;
 
@@ -54,6 +62,9 @@ Canvas::Initialize(Nan::ADDON_REGISTER_FUNCTION_ARGS_TYPE target) {
   Nan::SetTemplate(proto, "PNG_FILTER_AVG", Nan::New<Uint32>(PNG_FILTER_AVG));
   Nan::SetTemplate(proto, "PNG_FILTER_PAETH", Nan::New<Uint32>(PNG_FILTER_PAETH));
   Nan::SetTemplate(proto, "PNG_ALL_FILTERS", Nan::New<Uint32>(PNG_ALL_FILTERS));
+
+  // Class methods
+  Nan::SetMethod(ctor, "registerFont", RegisterFont);
 
   Nan::Set(target, Nan::New("Canvas").ToLocalChecked(), ctor->GetFunction());
 }
@@ -466,6 +477,74 @@ NAN_METHOD(Canvas::StreamJPEGSync) {
 
 #endif
 
+NAN_METHOD(Canvas::RegisterFont) {
+  FontFace face;
+
+  if (!info[0]->IsString()) {
+    return Nan::ThrowError("Wrong argument type");
+  }
+
+  String::Utf8Value filePath(info[0]);
+
+  if (!register_font((unsigned char*) *filePath, &face.target_desc)) {
+    Nan::ThrowError("Could not load font to the system's font host");
+  } else {
+    PangoFontDescription* d = pango_font_description_new();
+
+    if (!info[1]->IsObject()) {
+      Nan::ThrowError(GENERIC_FACE_ERROR);
+    } else { // now check the attrs, there are many ways to be wrong
+      Local<Object> desc = info[1]->ToObject();
+      Local<String> family_prop = Nan::New<String>("family").ToLocalChecked();
+      Local<String> weight_prop = Nan::New<String>("weight").ToLocalChecked();
+      Local<String> style_prop = Nan::New<String>("style").ToLocalChecked();
+
+      const char* family;
+      const char* weight = "normal";
+      const char* style = "normal";
+
+      Local<Value> family_val = desc->Get(family_prop);
+      if (family_val->IsString()) {
+        family = strdup(*String::Utf8Value(family_val));
+      } else {
+        Nan::ThrowError(GENERIC_FACE_ERROR);
+        return;
+      }
+
+      if (desc->HasOwnProperty(weight_prop)) {
+        Local<Value> weight_val = desc->Get(weight_prop);
+        if (weight_val->IsString() || weight_val->IsNumber()) {
+          weight = strdup(*String::Utf8Value(weight_val));
+        } else {
+          Nan::ThrowError(GENERIC_FACE_ERROR);
+          return;
+        }
+      }
+
+      if (desc->HasOwnProperty(style_prop)) {
+        Local<Value> style_val = desc->Get(style_prop);
+        if (style_val->IsString()) {
+          style = strdup(*String::Utf8Value(style_val));
+        } else {
+          Nan::ThrowError(GENERIC_FACE_ERROR);
+          return;
+        }
+      }
+
+      pango_font_description_set_weight(d, Canvas::GetWeightFromCSSString(weight));
+      pango_font_description_set_style(d, Canvas::GetStyleFromCSSString(style));
+      pango_font_description_set_family(d, family);
+
+      free((char*)family);
+      if (desc->HasOwnProperty(weight_prop)) free((char*)weight);
+      if (desc->HasOwnProperty(style_prop)) free((char*)style);
+
+      face.user_desc = d;
+      _font_face_list.push_back(face);
+    }
+  }
+}
+
 /*
  * Initialize cairo surface.
  */
@@ -514,6 +593,96 @@ Canvas::~Canvas() {
       Nan::AdjustExternalMemory(-4 * width * height);
       break;
   }
+}
+
+std::vector<FontFace>
+_init_font_face_list() {
+  std::vector<FontFace> x;
+  return x;
+}
+
+std::vector<FontFace> Canvas::_font_face_list = _init_font_face_list();
+
+/*
+ * Get a PangoStyle from a CSS string (like "italic")
+ */
+
+PangoStyle
+Canvas::GetStyleFromCSSString(const char *style) {
+  PangoStyle s = PANGO_STYLE_NORMAL;
+
+  if (strlen(style) > 0) {
+    if (0 == strcmp("italic", style)) {
+      s = PANGO_STYLE_ITALIC;
+    } else if (0 == strcmp("oblique", style)) {
+      s = PANGO_STYLE_OBLIQUE;
+    }
+  }
+
+  return s;
+}
+
+/*
+ * Get a PangoWeight from a CSS string ("bold", "100", etc)
+ */
+
+PangoWeight
+Canvas::GetWeightFromCSSString(const char *weight) {
+  PangoWeight w = PANGO_WEIGHT_NORMAL;
+
+  if (strlen(weight) > 0) {
+    if (0 == strcmp("bold", weight)) {
+      w = PANGO_WEIGHT_BOLD;
+    } else if (0 == strcmp("100", weight)) {
+      w = PANGO_WEIGHT_THIN;
+    } else if (0 == strcmp("200", weight)) {
+      w = PANGO_WEIGHT_ULTRALIGHT;
+    } else if (0 == strcmp("300", weight)) {
+      w = PANGO_WEIGHT_LIGHT;
+    } else if (0 == strcmp("400", weight)) {
+      w = PANGO_WEIGHT_NORMAL;
+    } else if (0 == strcmp("500", weight)) {
+      w = PANGO_WEIGHT_MEDIUM;
+    } else if (0 == strcmp("600", weight)) {
+      w = PANGO_WEIGHT_SEMIBOLD;
+    } else if (0 == strcmp("700", weight)) {
+      w = PANGO_WEIGHT_BOLD;
+    } else if (0 == strcmp("800", weight)) {
+      w = PANGO_WEIGHT_ULTRABOLD;
+    } else if (0 == strcmp("900", weight)) {
+      w = PANGO_WEIGHT_HEAVY;
+    }
+  }
+
+  return w;
+}
+
+/*
+ * Tries to find a matching font given to registerFont
+ */
+
+PangoFontDescription *
+Canvas::FindCustomFace(PangoFontDescription *desc) {
+  PangoFontDescription* best_match = NULL;
+  PangoFontDescription* best_match_target = NULL;
+  std::vector<FontFace>::iterator it = _font_face_list.begin();
+
+  while (it != _font_face_list.end()) {
+    FontFace f = *it;
+
+    if (g_ascii_strcasecmp(pango_font_description_get_family(desc),
+      pango_font_description_get_family(f.user_desc)) == 0) {
+
+      if (best_match == NULL || pango_font_description_better_match(desc, best_match, f.user_desc)) {
+        best_match = f.user_desc;
+        best_match_target = f.target_desc;
+      }
+    }
+
+    ++it;
+  }
+
+  return best_match_target;
 }
 
 /*
